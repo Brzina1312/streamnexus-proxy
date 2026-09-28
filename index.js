@@ -9,6 +9,9 @@ const PORT = process.env.PORT || 8080;
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
+// Trust proxy - required for Render and other hosting platforms
+app.set('trust proxy', true);
+
 // Global state for smart throttling
 const requestStats = {
   totalRequests: 0,
@@ -227,31 +230,22 @@ app.all('/proxy', globalLimiter, async (req, res) => {
     // Log response details for debugging
     if (response.status === 200) {
       console.log(`📝 Response preview: ${body.substring(0, 300)}${body.length > 300 ? '...' : ''}`);
-      
-      // Try to parse as JSON and show structure
-      try {
-        const jsonData = JSON.parse(body);
-        console.log(`📦 Response structure:`, JSON.stringify(jsonData, null, 2).substring(0, 500));
-      } catch (e) {
-        console.log(`⚠️  Response is not JSON`);
-      }
     }
     
-    // Copy response headers
-    response.headers.forEach((value, key) => {
-      res.setHeader(key, value);
-    });
-
-    // Explicitly set content-type to application/json for JSON responses
-    const contentType = response.headers.get('content-type');
-    if (contentType && contentType.includes('application/json')) {
-      res.type('application/json');
-    } else if (body.trim().startsWith('{') || body.trim().startsWith('[')) {
-      // If response looks like JSON but content-type wasn't set
-      res.type('application/json');
+    // Try to parse and forward as JSON (most portal responses are JSON)
+    try {
+      const jsonData = JSON.parse(body);
+      console.log(`📦 Response is JSON, forwarding with res.json()`);
+      return res.status(response.status).json(jsonData);
+    } catch (e) {
+      console.log(`⚠️  Response is not JSON, forwarding as text`);
     }
 
-    res.status(response.status).send(body);
+    // If not JSON, forward as plain text
+    const contentType = response.headers.get('content-type') || 'text/plain';
+    res.status(response.status)
+       .type(contentType)
+       .send(body);
 
   } catch (error) {
     console.error('❌ Proxy error:', error.message);

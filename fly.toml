@@ -1,0 +1,54 @@
+# Fly.io configuration for StreamNexus Portal Proxy
+app = "streamnexus-proxy"
+primary_region = "ams" # Amsterdam - close to Europe, adjust as needed
+
+[build]
+  # Use Node.js buildpack
+  [build.env]
+    NODE_VERSION = "18"
+
+[env]
+  PORT = "8080"
+  NODE_ENV = "production"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = false # Keep running to avoid cold starts
+  auto_start_machines = true
+  min_machines_running = 1
+  
+  [[http_service.checks]]
+    grace_period = "10s"
+    interval = "30s"
+    method = "GET"
+    timeout = "5s"
+    path = "/health"
+
+[[vm]]
+  cpu_kind = "shared"
+  cpus = 1
+  memory_mb = 256
+
+# Autoscaling (stay within free tier)
+[[services]]
+  protocol = "tcp"
+  internal_port = 8080
+
+  [[services.ports]]
+    port = 80
+    handlers = ["http"]
+    force_https = true
+
+  [[services.ports]]
+    port = 443
+    handlers = ["tls", "http"]
+
+  [services.concurrency]
+    type = "connections"
+    hard_limit = 100
+    soft_limit = 80
+
+# Logging
+[logging]
+  level = "info"

@@ -242,6 +242,15 @@ app.all('/proxy', globalLimiter, async (req, res) => {
       res.setHeader(key, value);
     });
 
+    // Explicitly set content-type to application/json for JSON responses
+    const contentType = response.headers.get('content-type');
+    if (contentType && contentType.includes('application/json')) {
+      res.type('application/json');
+    } else if (body.trim().startsWith('{') || body.trim().startsWith('[')) {
+      // If response looks like JSON but content-type wasn't set
+      res.type('application/json');
+    }
+
     res.status(response.status).send(body);
 
   } catch (error) {

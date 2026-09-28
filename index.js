@@ -224,6 +224,19 @@ app.all('/proxy', globalLimiter, async (req, res) => {
     // Forward response
     const body = await response.text();
     
+    // Log response details for debugging
+    if (response.status === 200) {
+      console.log(`📝 Response preview: ${body.substring(0, 300)}${body.length > 300 ? '...' : ''}`);
+      
+      // Try to parse as JSON and show structure
+      try {
+        const jsonData = JSON.parse(body);
+        console.log(`📦 Response structure:`, JSON.stringify(jsonData, null, 2).substring(0, 500));
+      } catch (e) {
+        console.log(`⚠️  Response is not JSON`);
+      }
+    }
+    
     // Copy response headers
     response.headers.forEach((value, key) => {
       res.setHeader(key, value);

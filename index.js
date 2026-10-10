@@ -10,8 +10,8 @@ const PORT = process.env.PORT || 8080;
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// Trust proxy - required for Render and other hosting platforms
-app.set('trust proxy', true);
+// Trust proxy - Railway uses 1 proxy layer
+app.set('trust proxy', 1);
 
 // Global state for smart throttling
 const requestStats = {

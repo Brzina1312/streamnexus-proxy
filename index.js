@@ -344,13 +344,23 @@ app.all('/proxy', globalLimiter, async (req, res) => {
     console.log(`🌐 Proxying ${req.method} ${targetUrl}`);
     const startTime = Date.now();
     
-    const response = await fetch(targetUrl, {
+    // Build fetch options
+    const fetchOptions = {
       method: req.method,
       headers: forwardHeaders,
       body: req.method !== 'GET' && req.method !== 'HEAD' ? JSON.stringify(req.body) : undefined,
-      signal: AbortSignal.timeout(30000),
       agent: targetUrl.startsWith('https') ? httpsAgent : httpAgent
-    });
+    };
+    
+    // Only add timeout for non-video requests (video streams need to stay open indefinitely)
+    if (!isVideoStream) {
+      fetchOptions.signal = AbortSignal.timeout(30000);
+      console.log(`⏱️  30s timeout set for non-video request`);
+    } else {
+      console.log(`♾️  No timeout - video stream can run indefinitely`);
+    }
+    
+    const response = await fetch(targetUrl, fetchOptions);
 
     const duration = Date.now() - startTime;
     requestStats.totalRequests++;

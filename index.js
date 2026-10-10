@@ -2,9 +2,28 @@ import express from 'express';
 import rateLimit from 'express-rate-limit';
 import fetch from 'node-fetch';
 import jwt from 'jsonwebtoken';
+import http from 'http';
+import https from 'https';
 
 const app = express();
 const PORT = process.env.PORT || 8080;
+
+// HTTP Keep-Alive agents for connection reuse (reduces latency)
+const httpAgent = new http.Agent({
+  keepAlive: true,
+  keepAliveMsecs: 1000,
+  maxSockets: 50,
+  maxFreeSockets: 10,
+  timeout: 60000
+});
+
+const httpsAgent = new https.Agent({
+  keepAlive: true,
+  keepAliveMsecs: 1000,
+  maxSockets: 50,
+  maxFreeSockets: 10,
+  timeout: 60000
+});
 
 // Middleware
 app.use(express.json());
@@ -24,6 +43,13 @@ const requestStats = {
 
 // Per-MAC request tracking
 const macRequestTimes = new Map();
+
+// Helper: Detect video streaming requests (should skip delays)
+function isVideoStreamRequest(url) {
+  return url.includes('/play/live.php') || 
+         url.includes('extension=ts') ||
+         url.includes('extension=m3u8');
+}
 
 // Rate limiter: Max 30 requests per minute globally
 const globalLimiter = rateLimit({
@@ -284,21 +310,28 @@ app.all('/proxy', globalLimiter, async (req, res) => {
       });
     }
 
+    // Detect if this is a video streaming request
+    const isVideoStream = isVideoStreamRequest(targetUrl);
+
     // Extract MAC address for per-MAC rate limiting
     const macAddress = req.headers['cookie']?.match(/mac=([^;]+)/)?.[1];
     
-    // Per-MAC rate limiting
-    if (macAddress) {
+    // Per-MAC rate limiting (skip for video streams to avoid buffering)
+    if (macAddress && !isVideoStream) {
       await waitForMacRateLimit(macAddress);
     }
 
-    // Smart delay based on current 403 rate
-    const baseDelay = requestStats.delayMs;
-    const jitter = Math.floor(Math.random() * 100); // Add 0-100ms random jitter
-    const totalDelay = baseDelay + jitter;
-    
-    console.log(`⏱️  Adding ${totalDelay}ms delay (base: ${baseDelay}ms, jitter: ${jitter}ms)`);
-    await new Promise(resolve => setTimeout(resolve, totalDelay));
+    // Smart delay based on current 403 rate (skip for video streams to reduce latency)
+    if (!isVideoStream) {
+      const baseDelay = requestStats.delayMs;
+      const jitter = Math.floor(Math.random() * 100); // Add 0-100ms random jitter
+      const totalDelay = baseDelay + jitter;
+      
+      console.log(`⏱️  Adding ${totalDelay}ms delay (base: ${baseDelay}ms, jitter: ${jitter}ms)`);
+      await new Promise(resolve => setTimeout(resolve, totalDelay));
+    } else {
+      console.log(`⚡ Video stream detected - skipping delays for optimal performance`);
+    }
 
     // Forward headers (except host/connection)
     const forwardHeaders = { ...req.headers };
@@ -315,7 +348,8 @@ app.all('/proxy', globalLimiter, async (req, res) => {
       method: req.method,
       headers: forwardHeaders,
       body: req.method !== 'GET' && req.method !== 'HEAD' ? JSON.stringify(req.body) : undefined,
-      signal: AbortSignal.timeout(30000)
+      signal: AbortSignal.timeout(30000),
+      agent: targetUrl.startsWith('https') ? httpsAgent : httpAgent
     });
 
     const duration = Date.now() - startTime;
@@ -372,8 +406,33 @@ app.all('/proxy', globalLimiter, async (req, res) => {
         res.set('Content-Length', response.headers.get('content-length'));
       }
       
-      // Pipe the response body
+      // Pipe the response body with proper cleanup to prevent memory leaks
       response.body.pipe(res);
+      
+      // Handle stream errors
+      response.body.on('error', (err) => {
+        console.error('❌ Stream error:', err.message);
+        if (!res.headersSent) {
+          res.status(500).end();
+        }
+        // Ensure stream is destroyed
+        if (!response.body.destroyed) {
+          response.body.destroy();
+        }
+      });
+      
+      // Cleanup when client disconnects or stream finishes
+      res.on('close', () => {
+        if (!response.body.destroyed) {
+          response.body.destroy();
+        }
+      });
+      
+      res.on('finish', () => {
+        if (!response.body.destroyed) {
+          response.body.destroy();
+        }
+      });
     } else {
       // Buffer text/JSON responses
       const body = await response.text();

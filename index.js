@@ -403,26 +403,41 @@ app.all('/proxy', globalLimiter, async (req, res) => {
 
     // Check content type to determine if we should buffer or stream
     const contentType = response.headers.get('content-type') || '';
+    const contentLength = parseInt(response.headers.get('content-length') || '0');
+    
     console.log(`📋 Content-Type: "${contentType}"`);
+    if (contentLength > 0) {
+      console.log(`📏 Content-Length: ${contentLength} bytes (${(contentLength / 1024 / 1024).toFixed(2)} MB)`);
+    }
     
     const isStreamable = contentType.includes('video') || 
                          contentType.includes('mpegurl') || 
                          contentType.includes('octet-stream') ||
                          contentType.includes('mp2t');
     
-    console.log(`🔍 Is streamable: ${isStreamable}`);
+    // Large responses (> 5 MB) should be streamed to prevent memory spikes
+    const isLargeResponse = contentLength > 5 * 1024 * 1024; // 5 MB threshold
+    
+    console.log(`🔍 Is streamable: ${isStreamable}, Is large: ${isLargeResponse}`);
 
-    if (isStreamable) {
-      // Stream video content directly without buffering
-      console.log(`🎥 Streaming ${contentType} response`);
+    if (isStreamable || isLargeResponse) {
+      // Stream content directly without buffering
+      if (isLargeResponse && !isStreamable) {
+        console.log(`📦 Large response (${(contentLength / 1024 / 1024).toFixed(2)} MB) - streaming to prevent memory spike`);
+      } else if (isStreamable) {
+        console.log(`🎥 Streaming ${contentType} response`);
+      }
       
       res.status(response.status);
       res.set('Content-Type', contentType);
-      res.set('Accept-Ranges', 'bytes');
-      res.set('Cache-Control', 'no-cache');
       
-      if (response.headers.get('content-length')) {
-        res.set('Content-Length', response.headers.get('content-length'));
+      if (isStreamable) {
+        res.set('Accept-Ranges', 'bytes');
+        res.set('Cache-Control', 'no-cache');
+      }
+      
+      if (contentLength) {
+        res.set('Content-Length', contentLength.toString());
       }
       
       // Pipe the response body with proper cleanup to prevent memory leaks

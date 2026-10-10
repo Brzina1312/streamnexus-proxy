@@ -1,6 +1,7 @@
 import express from 'express';
 import rateLimit from 'express-rate-limit';
 import fetch from 'node-fetch';
+import jwt from 'jsonwebtoken';
 
 const app = express();
 const PORT = process.env.PORT || 8080;
@@ -131,6 +132,133 @@ app.get('/stats', (req, res) => {
         : 'Operating normally'
     }
   });
+});
+
+// M3U Stream endpoint - validates token and streams from portal
+app.get('/stream/:token', globalLimiter, async (req, res) => {
+  try {
+    const token = req.params.token;
+    
+    // Verify JWT token
+    const JWT_SECRET = process.env.JWT_SECRET;
+    if (!JWT_SECRET) {
+      console.error('❌ JWT_SECRET not configured');
+      return res.status(500).json({ error: 'Server configuration error' });
+    }
+    
+    let tokenData;
+    try {
+      tokenData = jwt.verify(token, JWT_SECRET);
+    } catch (error) {
+      console.error('❌ Invalid token:', error.message);
+      return res.status(401).json({ error: 'Invalid or expired token' });
+    }
+    
+    const { channelCmd, userMac } = tokenData;
+    
+    if (!channelCmd || !userMac) {
+      console.error('❌ Missing channelCmd or userMac in token');
+      return res.status(400).json({ error: 'Invalid token data' });
+    }
+    
+    // Extract portal URL from channelCmd (remove "ffmpeg " prefix if present)
+    let portalUrl = channelCmd;
+    if (portalUrl.startsWith('ffmpeg ')) {
+      portalUrl = portalUrl.substring(7);
+    }
+    
+    // Replace caching MAC with user's MAC
+    const macPattern = /mac=([0-9A-Fa-f]{2}:[0-9A-Fa-f]{2}:[0-9A-Fa-f]{2}:[0-9A-Fa-f]{2}:[0-9A-Fa-f]{2}:[0-9A-Fa-f]{2})/;
+    portalUrl = portalUrl.replace(macPattern, `mac=${userMac}`);
+    
+    console.log(`🎬 Streaming channel for MAC: ${userMac}`);
+    
+    // Per-MAC rate limiting
+    const macAddress = portalUrl.match(/mac=([^&]+)/)?.[1];
+    if (macAddress) {
+      await waitForMacRateLimit(macAddress);
+    }
+    
+    // Check if we're in backoff mode
+    if (shouldBackoff()) {
+      const waitTime = requestStats.backoffUntil - Date.now();
+      console.log(`🛑 In backoff mode - ${waitTime}ms remaining`);
+      return res.status(503).json({ 
+        error: 'Service temporarily throttled',
+        retryAfter: Math.ceil(waitTime / 1000)
+      });
+    }
+    
+    // Smart delay
+    const baseDelay = requestStats.delayMs;
+    const jitter = Math.floor(Math.random() * 100);
+    const totalDelay = baseDelay + jitter;
+    
+    await new Promise(resolve => setTimeout(resolve, totalDelay));
+    
+    // Fetch from portal
+    console.log(`🌐 Fetching stream from portal`);
+    const startTime = Date.now();
+    
+    const response = await fetch(portalUrl, {
+      method: 'GET',
+      headers: {
+        'User-Agent': req.headers['user-agent'] || 'Mozilla/5.0',
+        'Range': req.headers['range'] || ''
+      },
+      signal: AbortSignal.timeout(30000)
+    });
+    
+    const duration = Date.now() - startTime;
+    requestStats.totalRequests++;
+    
+    // Handle 403
+    if (response.status === 403) {
+      requestStats.forbiddenCount++;
+      requestStats.lastForbidden = Date.now();
+      console.error(`❌ 403 Forbidden from portal`);
+      
+      if (requestStats.forbiddenCount >= 3 && 
+          requestStats.totalRequests - requestStats.forbiddenCount < 2) {
+        requestStats.backoffUntil = Date.now() + 30000;
+      }
+      
+      adjustDelay();
+      return res.status(403).json({ error: 'Portal access denied' });
+    }
+    
+    if (!response.ok) {
+      console.error(`❌ Portal returned ${response.status}`);
+      return res.status(response.status).json({ error: 'Portal request failed' });
+    }
+    
+    console.log(`✅ Stream success (${duration}ms)`);
+    
+    // Reset backoff on success
+    if (requestStats.backoffUntil) {
+      requestStats.backoffUntil = null;
+    }
+    
+    // Stream response back to player
+    res.status(response.status);
+    res.set('Content-Type', response.headers.get('content-type') || 'video/mp2t');
+    res.set('Accept-Ranges', 'bytes');
+    res.set('Cache-Control', 'no-cache');
+    
+    if (response.headers.get('content-length')) {
+      res.set('Content-Length', response.headers.get('content-length'));
+    }
+    
+    // Pipe the response body
+    response.body.pipe(res);
+    
+  } catch (error) {
+    console.error('❌ Stream error:', error.message);
+    res.status(500).json({ 
+      error: 'Stream failed',
+      message: error.message 
+    });
+  }
 });
 
 // Main proxy endpoint

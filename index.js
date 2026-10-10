@@ -352,28 +352,51 @@ app.all('/proxy', globalLimiter, async (req, res) => {
       adjustDelay();
     }
 
-    // Forward response
-    const body = await response.text();
-    
-    // Log response details for debugging
-    if (response.status === 200) {
-      console.log(`📝 Response preview: ${body.substring(0, 300)}${body.length > 300 ? '...' : ''}`);
-    }
-    
-    // Try to parse and forward as JSON (most portal responses are JSON)
-    try {
-      const jsonData = JSON.parse(body);
-      console.log(`📦 Response is JSON, forwarding with res.json()`);
-      return res.status(response.status).json(jsonData);
-    } catch (e) {
-      console.log(`⚠️  Response is not JSON, forwarding as text`);
-    }
+    // Check content type to determine if we should buffer or stream
+    const contentType = response.headers.get('content-type') || '';
+    const isStreamable = contentType.includes('video') || 
+                         contentType.includes('mpegurl') || 
+                         contentType.includes('octet-stream') ||
+                         contentType.includes('mp2t');
 
-    // If not JSON, forward as plain text
-    const contentType = response.headers.get('content-type') || 'text/plain';
-    res.status(response.status)
-       .type(contentType)
-       .send(body);
+    if (isStreamable) {
+      // Stream video content directly without buffering
+      console.log(`🎥 Streaming ${contentType} response`);
+      
+      res.status(response.status);
+      res.set('Content-Type', contentType);
+      res.set('Accept-Ranges', 'bytes');
+      res.set('Cache-Control', 'no-cache');
+      
+      if (response.headers.get('content-length')) {
+        res.set('Content-Length', response.headers.get('content-length'));
+      }
+      
+      // Pipe the response body
+      response.body.pipe(res);
+    } else {
+      // Buffer text/JSON responses
+      const body = await response.text();
+      
+      // Log response details for debugging
+      if (response.status === 200) {
+        console.log(`📝 Response preview: ${body.substring(0, 300)}${body.length > 300 ? '...' : ''}`);
+      }
+      
+      // Try to parse and forward as JSON (most portal responses are JSON)
+      try {
+        const jsonData = JSON.parse(body);
+        console.log(`📦 Response is JSON, forwarding with res.json()`);
+        return res.status(response.status).json(jsonData);
+      } catch (e) {
+        console.log(`⚠️  Response is not JSON, forwarding as text`);
+      }
+
+      // If not JSON, forward as plain text
+      res.status(response.status)
+         .type(contentType || 'text/plain')
+         .send(body);
+    }
 
   } catch (error) {
     console.error('❌ Proxy error:', error.message);

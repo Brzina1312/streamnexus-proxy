@@ -355,6 +355,9 @@ app.all('/proxy', globalLimiter, async (req, res) => {
     const duration = Date.now() - startTime;
     requestStats.totalRequests++;
 
+    // Log response status for debugging
+    console.log(`📡 Response: ${response.status} ${response.statusText} (${duration}ms)`);
+
     // Check for 403 and handle it
     if (response.status === 403) {
       requestStats.forbiddenCount++;
@@ -372,13 +375,15 @@ app.all('/proxy', globalLimiter, async (req, res) => {
       
       adjustDelay();
     } else if (response.status === 200) {
-      console.log(`✅ Success (${duration}ms)`);
+      console.log(`✅ Success`);
       
       // Reset backoff on success
       if (requestStats.backoffUntil) {
         requestStats.backoffUntil = null;
         console.log(`✅ Backoff cleared after successful request`);
       }
+    } else {
+      console.warn(`⚠️  Non-200 status: ${response.status}`);
     }
 
     // Every 10 requests, adjust delay based on 403 rate
@@ -388,10 +393,14 @@ app.all('/proxy', globalLimiter, async (req, res) => {
 
     // Check content type to determine if we should buffer or stream
     const contentType = response.headers.get('content-type') || '';
+    console.log(`📋 Content-Type: "${contentType}"`);
+    
     const isStreamable = contentType.includes('video') || 
                          contentType.includes('mpegurl') || 
                          contentType.includes('octet-stream') ||
                          contentType.includes('mp2t');
+    
+    console.log(`🔍 Is streamable: ${isStreamable}`);
 
     if (isStreamable) {
       // Stream video content directly without buffering

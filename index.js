@@ -420,6 +420,14 @@ app.all('/proxy', globalLimiter, async (req, res) => {
     
     console.log(`🔍 Is streamable: ${isStreamable}, Is large: ${isLargeResponse}`);
 
+    // Detect binary payloads: these MUST never be decoded as text
+    // (decoding a PNG as UTF-8 replaces every byte > 0x7F with U+FFFD
+    // and corrupts the image - this made logo downloads unusable)
+    const isBinary = contentType.startsWith('image/') ||
+                     contentType.includes('octet-stream') ||
+                     contentType.startsWith('audio/') ||
+                     (contentType === '' && contentLength > 0);
+
     if (isStreamable || isLargeResponse) {
       // Stream content directly without buffering
       if (isLargeResponse && !isStreamable) {
@@ -467,6 +475,14 @@ app.all('/proxy', globalLimiter, async (req, res) => {
           response.body.destroy();
         }
       });
+    } else if (isBinary) {
+      // Buffer binary responses as raw bytes - never through .text()
+      const buffer = Buffer.from(await response.arrayBuffer());
+      console.log(`🖼️  Binary response (${contentType || 'unknown'}) - ${buffer.length} bytes preserved`);
+      res.status(response.status);
+      if (contentType) res.set('Content-Type', contentType);
+      res.set('Content-Length', buffer.length.toString());
+      res.send(buffer);
     } else {
       // Buffer text/JSON responses
       const body = await response.text();

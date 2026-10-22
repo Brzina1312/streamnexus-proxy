@@ -484,27 +484,43 @@ app.all('/proxy', globalLimiter, async (req, res) => {
       res.set('Content-Length', buffer.length.toString());
       res.send(buffer);
     } else {
-      // Buffer text/JSON responses
-      const body = await response.text();
+      // Stream text/JSON responses as raw passthrough bytes. NEVER buffer +
+      // JSON.parse + res.json(): big catalog dumps (50k+ channels, sent
+      // without Content-Length) held 3x their size in memory and OOMed the
+      // 512MB container. The portal body is forwarded byte-for-byte and the
+      // caller parses JSON itself.
+      console.log(`📤 Streaming ${contentType || 'text'} passthrough (no buffering)`);
+      res.status(response.status);
+      if (contentType) res.set('Content-Type', contentType);
+      if (contentLength) res.set('Content-Length', contentLength.toString());
       
-      // Log response details for debugging
-      if (response.status === 200) {
-        console.log(`📝 Response preview: ${body.substring(0, 300)}${body.length > 300 ? '...' : ''}`);
-      }
+      // Pipe the response body with proper cleanup to prevent memory leaks
+      response.body.pipe(res);
       
-      // Try to parse and forward as JSON (most portal responses are JSON)
-      try {
-        const jsonData = JSON.parse(body);
-        console.log(`📦 Response is JSON, forwarding with res.json()`);
-        return res.status(response.status).json(jsonData);
-      } catch (e) {
-        console.log(`⚠️  Response is not JSON, forwarding as text`);
-      }
-
-      // If not JSON, forward as plain text
-      res.status(response.status)
-         .type(contentType || 'text/plain')
-         .send(body);
+      // Handle stream errors
+      response.body.on('error', (err) => {
+        console.error('❌ Stream error:', err.message);
+        if (!res.headersSent) {
+          res.status(500).end();
+        }
+        // Ensure stream is destroyed
+        if (!response.body.destroyed) {
+          response.body.destroy();
+        }
+      });
+      
+      // Cleanup when client disconnects or stream finishes
+      res.on('close', () => {
+        if (!response.body.destroyed) {
+          response.body.destroy();
+        }
+      });
+      
+      res.on('finish', () => {
+        if (!response.body.destroyed) {
+          response.body.destroy();
+        }
+      });
     }
 
   } catch (error) {
